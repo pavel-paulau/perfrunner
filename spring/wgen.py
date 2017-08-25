@@ -22,6 +22,7 @@ from spring.docgen import (
     FTSKey,
     GSIMultiIndexDocument,
     HashKeys,
+    HotKey,
     ImportExportDocument,
     ImportExportDocumentArray,
     ImportExportDocumentNested,
@@ -37,7 +38,6 @@ from spring.docgen import (
     RefDocument,
     ReverseLookupDocument,
     ReverseRangeLookupDocument,
-    SequentialHotKey,
     SequentialKey,
     SequentialPlasmaDocument,
     SmallPlasmaDocument,
@@ -445,12 +445,12 @@ class AsyncKVWorker(KVWorker):
         reactor.run()
 
 
-class SeqReadsWorker(Worker):
+class HotReadsWorker(Worker):
 
     def run(self, sid, *args):
         set_cpu_afinity(sid)
 
-        for key in SequentialHotKey(sid, self.ws, self.ts.prefix):
+        for key in HotKey(sid, self.ws, self.ts.prefix):
             key = self.hash_keys.hash_it(key)
             self.cb.read(key)
 
@@ -483,8 +483,8 @@ class WorkerFactory:
             worker = SeqXATTRUpdatesWorker
         elif getattr(settings, 'seq_updates', None):
             worker = SeqUpdatesWorker
-        elif getattr(settings, 'seq_reads', None):
-            worker = SeqReadsWorker
+        elif getattr(settings, 'hot_reads', None):
+            worker = HotReadsWorker
         elif getattr(settings, 'subdoc_field', None):
             worker = SubDocWorker
         elif getattr(settings, 'xattr_field', None):

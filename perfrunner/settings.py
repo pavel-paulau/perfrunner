@@ -302,7 +302,7 @@ class PhaseSettings:
 
     OPS = 0
 
-    SEQ_READS = False
+    HOT_READS = False
     SEQ_UPDATES = False
 
     ITERATIONS = 1
@@ -383,7 +383,7 @@ class PhaseSettings:
         self.hash_keys = int(options.get('hash_keys', self.HASH_KEYS))
         self.key_length = int(options.get('key_length', self.KEY_LENGTH))
 
-        self.seq_reads = self.SEQ_READS
+        self.hot_reads = self.HOT_READS
         self.seq_updates = self.SEQ_UPDATES
 
         self.iterations = int(options.get('iterations', self.ITERATIONS))
@@ -454,8 +454,7 @@ class LoadSettings(PhaseSettings):
 
 class HotLoadSettings(PhaseSettings):
 
-    SEQ_READS = True
-    SEQ_UPDATES = False
+    HOT_READS = True
 
     def __init__(self, options: dict):
         if 'size' in options:

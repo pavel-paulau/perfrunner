@@ -15,7 +15,7 @@ from spring.dictionary import (
     STREET_SUFFIX,
 )
 
-ASCII_A_OFFSET = 97
+PRIME = 971
 
 
 class Generator:
@@ -133,14 +133,16 @@ class WorkingSetKey(Generator):
         num_hot_items = int(num_existing_items * self.working_set / 100)
         num_cold_items = num_existing_items - num_hot_items
 
-        left_boundary = 1 + curr_deletes
+        left_boundary = curr_deletes
         if random.randint(0, 100) <= self.working_set_access:  # cache hit
             left_boundary += num_cold_items
             right_boundary = curr_items
         else:  # cache miss
             right_boundary = left_boundary + num_cold_items
 
-        key = np.random.random_integers(low=left_boundary, high=right_boundary)
+        key = np.random.random_integers(low=left_boundary,
+                                        high=right_boundary - 1)
+        key = 1 + (key * PRIME) % num_existing_items
         key = '%012d' % key
         return self.add_prefix(key)
 
@@ -224,13 +226,12 @@ class SequentialKey(Generator):
             yield key
 
 
-class SequentialHotKey(Generator):
+class HotKey(Generator):
 
-    """Sequentially generate existing keys equally divided the workers.
+    """Generate the existing keys equally divided between the workers.
 
-    SequentialHotKey equally divides the working set between the workers and
-    sequentially iterates over a given part of the working set (based on the
-    sequential worker identifier).
+    HotKey equally divides the working set between the workers and iterates over
+    a given part of the working set (based on the sequential worker identifier).
 
     This generator is used for warming up the working set.
     """
@@ -244,9 +245,10 @@ class SequentialHotKey(Generator):
         num_hot_keys = int(self.ws.items * self.ws.working_set / 100)
         num_cold_items = self.ws.items - num_hot_keys
 
-        for seq_id in range(1 + num_cold_items + self.sid,
-                            1 + self.ws.items,
+        for seq_id in range(num_cold_items + self.sid,
+                            self.ws.items,
                             self.ws.workers):
+            seq_id = 1 + (seq_id * PRIME) % self.ws.items
             key = '%012d' % seq_id
             key = self.add_prefix(key)
             yield key
@@ -259,8 +261,6 @@ class UnorderedKey(Generator):
     The key space is still the same.
     """
 
-    PRIME = 971
-
     def __init__(self, sid, ws, prefix):
         self.sid = sid
         self.ws = ws
@@ -271,7 +271,7 @@ class UnorderedKey(Generator):
 
         key_id = 0
         for _ in range(keys_per_workers):
-            key_id = (key_id + self.PRIME) % keys_per_workers
+            key_id = (key_id + PRIME) % keys_per_workers
             key = '%012d' % (key_id + 1 + self.sid * keys_per_workers)
             key = self.add_prefix(key)
             yield key

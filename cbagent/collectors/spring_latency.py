@@ -3,101 +3,10 @@ from time import sleep, time
 from cbagent.collectors import Latency, ObserveIndexLatency
 from logger import logger
 from perfrunner.helpers.misc import uhex
-from spring.cbgen import CBGen, SubDocGen
-from spring.docgen import Document, NestedDocument, UniformKey, WorkingSetKey
+from spring.docgen import Document
 
 
-class SpringLatency(Latency):
-
-    COLLECTOR = "spring_latency"
-
-    METRICS = "latency_set", "latency_get"
-
-    def __init__(self, settings, workload, prefix=None):
-        super().__init__(settings)
-
-        self.interval = settings.lat_interval
-
-        self.clients = []
-        for bucket in self.get_buckets():
-            client = CBGen(bucket=bucket, host=settings.master_node,
-                           username=bucket, password=settings.bucket_password)
-            self.clients.append((bucket, client))
-
-        if workload.working_set < 100:
-            self.existing_keys = WorkingSetKey(workload.working_set,
-                                               workload.working_set_access,
-                                               prefix=prefix)
-        else:
-            self.existing_keys = UniformKey(prefix=prefix)
-
-        if not hasattr(workload, 'doc_gen') or workload.doc_gen == 'basic':
-            self.new_docs = Document(workload.size)
-        elif workload.doc_gen == 'nested':
-            self.new_docs = NestedDocument(workload.size)
-        self.items = workload.items
-
-    def measure(self, client, metric, bucket):
-        key = self.existing_keys.next(curr_items=self.items, curr_deletes=0)
-        doc = self.new_docs.next(key)
-
-        t0 = time()
-        if metric == "latency_set":
-            client.create(key, doc)
-        elif metric == "latency_get":
-            client.read(key)
-        return 1000 * (time() - t0)  # Latency in ms
-
-    def sample(self):
-        for bucket, client in self.clients:
-            samples = {}
-            for metric in self.METRICS:
-                samples[metric] = self.measure(client, metric, bucket)
-            self.store.append(samples, cluster=self.cluster,
-                              bucket=bucket, collector=self.COLLECTOR)
-
-
-class SubdocLatency(SpringLatency):
-
-    def __init__(self, settings, workload, prefix=None):
-        super().__init__(settings, workload, prefix)
-
-        self.clients = []
-        self.ws = workload
-        for bucket in self.get_buckets():
-            client = SubDocGen(bucket=bucket,
-                               host=settings.master_node,
-                               username=bucket,
-                               password=settings.bucket_password)
-            self.clients.append((bucket, client))
-
-    def measure(self, client, metric, bucket):
-        key = self.existing_keys.next(curr_items=self.items, curr_deletes=0)
-        doc = self.new_docs.next(key)
-
-        t0 = time()
-        if metric == "latency_set":
-            client.update(key, self.ws.subdoc_field, doc)
-        elif metric == "latency_get":
-            client.read(key, self.ws.subdoc_field)
-        return 1000 * (time() - t0)  # Latency in ms
-
-
-class XATTRLatency(SubdocLatency):
-
-    def measure(self, client, metric, bucket):
-        key = self.existing_keys.next(curr_items=self.items, curr_deletes=0)
-        doc = self.new_docs.next(key)
-
-        t0 = time()
-        if metric == "latency_set":
-            client.update_xattr(key, self.ws.xattr_field, doc)
-        elif metric == "latency_get":
-            client.read_xattr(key, self.ws.xattr_field)
-        return 1000 * (time() - t0)  # Latency in ms
-
-
-class DurabilityLatency(ObserveIndexLatency, SpringLatency):
+class DurabilityLatency(ObserveIndexLatency, Latency):
 
     COLLECTOR = "durability"
 
@@ -105,8 +14,10 @@ class DurabilityLatency(ObserveIndexLatency, SpringLatency):
 
     DURABILITY_TIMEOUT = 120
 
-    def __init__(self, settings, workload, prefix=None):
-        SpringLatency.__init__(self, settings, workload, prefix=prefix)
+    def __init__(self, settings, workload):
+        super().__init__(settings)
+
+        self.new_docs = Document(workload.size)
 
         self.pools = self.init_pool(settings)
 

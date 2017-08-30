@@ -128,7 +128,8 @@ class WorkingSetKey(Generator):
         self.working_set_access = working_set_access
         self.prefix = prefix
 
-    def next(self, curr_items: int, curr_deletes: int, *args) -> str:
+    def next(self, curr_items: int, curr_deletes: int, curr_offset: int,
+             *args) -> str:
         num_existing_items = curr_items - curr_deletes
         num_hot_items = int(num_existing_items * self.working_set / 100)
         num_cold_items = num_existing_items - num_hot_items
@@ -142,48 +143,8 @@ class WorkingSetKey(Generator):
 
         key = np.random.random_integers(low=left_boundary,
                                         high=right_boundary - 1)
+        key += curr_offset
         key = 1 + (key * PRIME) % num_existing_items
-        key = '%012d' % key
-        return self.add_prefix(key)
-
-
-class MovingWorkingSetKey(Generator):
-
-    def __init__(self, working_set: int, working_set_access: int, prefix: str,
-                 working_set_move_time: int, working_set_moving_docs: int):
-        self.working_set = working_set
-        self.working_set_access = working_set_access
-        self.prefix = prefix
-        self.working_set_move_time = working_set_move_time
-        self.working_set_moving_docs = working_set_moving_docs
-
-    def next(self, curr_items: int, curr_deletes: int,
-             current_hot_load_start: int, timer_elapse: int) -> str:
-        num_existing_items = curr_items - curr_deletes
-        num_hot_items = int(num_existing_items * self.working_set / 100)
-        num_cold_items = num_existing_items - num_hot_items
-
-        left_boundary = 1 + curr_deletes
-
-        if timer_elapse.value:
-            timer_elapse.value = 0
-            # Create next hot_load_start, add working_set_move_docs and then
-            # modulus to prevent going beyond num_docs
-            num_items = num_existing_items - num_hot_items
-            offset = current_hot_load_start.value + self.working_set_moving_docs
-            current_hot_load_start.value = int(offset % num_items)
-
-        if self.working_set_access == 100 or \
-                random.randint(0, 100) <= self.working_set_access:
-            left_boundary += current_hot_load_start.value
-            right_boundary = left_boundary + num_hot_items
-            key = np.random.random_integers(left_boundary, right_boundary)
-        else:
-            cold_key_offset = np.random.random_integers(0, num_cold_items)
-            if cold_key_offset > left_boundary + current_hot_load_start.value:
-                key = left_boundary + cold_key_offset + num_hot_items
-            else:
-                key = left_boundary + cold_key_offset
         key = '%012d' % key
         return self.add_prefix(key)
 

@@ -13,7 +13,6 @@ from requests.auth import HTTPBasicAuth
 from twisted.internet import reactor
 
 from logger import logger
-from perfrunner.helpers.sync import SyncHotWorkload
 from spring.cbgen import CBAsyncGen, CBGen, ElasticGen, FtsGen, SubDocGen
 from spring.docgen import (
     ArrayIndexingDocument,
@@ -31,7 +30,6 @@ from spring.docgen import (
     KeyForRemoval,
     LargeDocument,
     LargeItemPlasmaDocument,
-    MovingWorkingSetKey,
     NestedDocument,
     NewOrderedKey,
     ProfileDocument,
@@ -91,13 +89,7 @@ class Worker:
         self.new_keys = NewOrderedKey(prefix=self.ts.prefix,
                                       expiration=self.ws.expiration)
 
-        if self.ws.working_set_move_time:
-            self.existing_keys = MovingWorkingSetKey(self.ws.working_set,
-                                                     self.ws.working_set_access,
-                                                     self.ts.prefix,
-                                                     self.ws.working_set_move_time,
-                                                     self.ws.working_set_moving_docs)
-        elif self.ws.working_set < 100:
+        if self.ws.working_set < 100:
             self.existing_keys = WorkingSetKey(self.ws.working_set,
                                                self.ws.working_set_access,
                                                self.ts.prefix)
@@ -242,7 +234,9 @@ class KVWorker(Worker):
                 key = self.hash_keys.hash_it(key)
                 cmds.append((None, cb.create, (key, doc, ttl)))
             elif op == 'r':
-                key = self.existing_keys.next(curr_items_spot, deleted_spot)
+                key = self.existing_keys.next(curr_items_spot,
+                                              deleted_spot,
+                                              self.curr_offset.value)
                 key = self.hash_keys.hash_it(key)
 
                 if extras == 'subdoc':
@@ -252,9 +246,9 @@ class KVWorker(Worker):
                 else:
                     cmds.append(('get', cb.read, (key, )))
             elif op == 'u':
-                key = self.existing_keys.next(curr_items_spot, deleted_spot,
-                                              self.current_hot_load_start,
-                                              self.timer_elapse)
+                key = self.existing_keys.next(curr_items_spot,
+                                              deleted_spot,
+                                              self.curr_offset.value)
                 doc = self.docs.next(key)
                 key = self.hash_keys.hash_it(key)
 
@@ -312,7 +306,7 @@ class KVWorker(Worker):
         return curr_ops.value < self.ws.ops and not self.time_to_stop()
 
     def run(self, sid, lock, curr_ops, curr_items, deleted_items,
-            current_hot_load_start=None, timer_elapse=None):
+            curr_offset=None):
 
         if self.ws.throughput < float('inf'):
             self.target_time = float(self.BATCH_SIZE) * self.ws.workers / \
@@ -323,8 +317,7 @@ class KVWorker(Worker):
         self.lock = lock
         self.curr_items = curr_items
         self.deleted_items = deleted_items
-        self.current_hot_load_start = current_hot_load_start
-        self.timer_elapse = timer_elapse
+        self.curr_offset = curr_offset
 
         self.seed()
 
@@ -426,7 +419,7 @@ class AsyncKVWorker(KVWorker):
         d.addErrback(self.error, cb, i)
 
     def run(self, sid, lock, curr_ops, curr_items, deleted_items,
-            current_hot_load_start=None, timer_elapse=None):
+            curr_offset=None):
         set_cpu_afinity(sid)
 
         if self.ws.throughput < float('inf'):
@@ -440,8 +433,7 @@ class AsyncKVWorker(KVWorker):
         self.curr_items = curr_items
         self.deleted_items = deleted_items
         self.curr_ops = curr_ops
-        self.current_hot_load_start = current_hot_load_start
-        self.timer_elapse = timer_elapse
+        self.curr_offset = curr_offset
 
         self.seed()
 
@@ -781,8 +773,7 @@ class WorkloadGen:
                       name,
                       curr_items=None,
                       deleted_items=None,
-                      current_hot_load_start=None,
-                      timer_elapse=None):
+                      curr_offset=None):
         curr_ops = Value('L', 0)
         lock = Lock()
         worker_type, total_workers = worker_factory(self.ws)
@@ -795,7 +786,7 @@ class WorkloadGen:
 
         for sid in range(total_workers):
             args = (sid, lock, curr_ops, curr_items, deleted_items,
-                    current_hot_load_start, timer_elapse)
+                    curr_offset)
 
             worker = worker_type(self.ws, self.ts, self.shutdown_event)
 
@@ -813,32 +804,39 @@ class WorkloadGen:
                 if process.exitcode:
                     logger.interrupt('Worker finished with non-zero exit code')
 
+    def start_drift(self, curr_offset: Value):
+        if self.ws.working_set_drift_items:
+            self.drift = Process(target=self.working_set_drift,
+                                 args=(curr_offset, ))
+            self.drift.start()
+
+    def working_set_drift(self, curr_offset: Value):
+        while True:
+            time.sleep(self.ws.working_set_drift_interval)
+            curr_offset.value += self.ws.working_set_drift_items
+
     def run(self):
         curr_items = Value('L', self.ws.items)
         deleted_items = Value('L', 0)
-        current_hot_load_start = Value('L', 0)
-        timer_elapse = Value('I', 0)
-
-        if self.ws.working_set_move_time:
-            current_hot_load_start.value = int(self.ws.items * self.ws.working_set / 100)
+        curr_offset = Value('L', 0)
 
         logger.info('Starting all workers')
 
         self.start_workers(WorkerFactory,
                            'kv', curr_items, deleted_items,
-                           current_hot_load_start, timer_elapse)
+                           curr_offset)
         self.start_workers(ViewWorkerFactory,
                            'view', curr_items, deleted_items)
         self.start_workers(N1QLWorkerFactory,
                            'n1ql', curr_items, deleted_items)
         self.start_workers(FtsWorkerFactory, 'fts')
 
-        sync = SyncHotWorkload(current_hot_load_start, timer_elapse)
-        sync.start_timer(self.ws)
+        self.start_drift(curr_offset)
 
         if self.timer:
             time.sleep(self.timer)
             self.shutdown_event.set()
         self.wait_for_all_workers()
 
-        sync.stop_timer()
+        if hasattr(self, 'drift'):
+            self.drift.terminate()

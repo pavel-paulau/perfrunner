@@ -2,8 +2,7 @@ import math
 import random
 import time
 from hashlib import md5
-from itertools import cycle
-from typing import List, Tuple
+from typing import Iterator, List, Tuple
 
 import numpy as np
 from fastdocgen import build_achievements
@@ -14,25 +13,35 @@ from spring.dictionary import (
     STATES,
     STREET_SUFFIX,
 )
+from spring.settings import WorkloadSettings
 
 PRIME = 971
 
 
-class Generator:
+def decimal_fmtr(key: int, prefix: str) -> str:
+    key = '%012d' % key
+    if prefix:
+        return '%s-%s' % (prefix, key)
+    return key
 
-    def __init__(self):
-        self.prefix = None
 
-    def __iter__(self):
-        return self
+class Key:
 
-    def add_prefix(self, key: str) -> str:
-        if self.prefix:
-            return '%s-%s' % (self.prefix, key)
+    def __init__(self, number: int, prefix: str, fmtr: str, hit: bool = False):
+        self.number = number
+        self.prefix = prefix
+        self.hit = hit
+        self.fmtr = fmtr
+
+    @property
+    def string(self) -> str:
+        key = decimal_fmtr(self.number, self.prefix)
+        if self.fmtr == 'hash':
+            return md5(key.encode('utf-8')).hexdigest()
         return key
 
 
-class NewOrderedKey(Generator):
+class NewOrderedKey:
 
     """Generate ordered keys with an optional common prefix.
 
@@ -45,33 +54,27 @@ class NewOrderedKey(Generator):
     This key pattern is rather uncommon in real-world scenarios.
     """
 
-    def __init__(self, prefix: str, expiration: int):
+    def __init__(self, prefix: str, fmtr: str):
         self.prefix = prefix
-        self.expiration = expiration
-        self.ttls = cycle(range(150, 450, 30))
+        self.fmtr = fmtr
 
-    def next(self, curr_items) -> Tuple[str, int]:
-        key = '%012d' % curr_items
-        key = self.add_prefix(key)
-        ttl = None
-        if self.expiration and random.randint(1, 100) <= self.expiration:
-            ttl = next(self.ttls)
-        return key, ttl
+    def next(self, curr_items: int) -> Key:
+        return Key(number=curr_items, prefix=self.prefix, fmtr=self.fmtr)
 
 
-class KeyForRemoval(Generator):
+class KeyForRemoval:
 
     """Pick an existing key at the beginning of the key space."""
 
-    def __init__(self, prefix: str):
+    def __init__(self, prefix: str, fmtr: str):
         self.prefix = prefix
+        self.fmtr = fmtr
 
-    def next(self, curr_deletes: int) -> str:
-        key = '%012d' % curr_deletes
-        return self.add_prefix(key)
+    def next(self, curr_deletes: int) -> Key:
+        return Key(number=curr_deletes, prefix=self.prefix, fmtr=self.fmtr)
 
 
-class UniformKey(Generator):
+class UniformKey:
 
     """Randomly sample an existing key from the entire key space.
 
@@ -89,16 +92,17 @@ class UniformKey(Generator):
     This generator should not be used when the key access pattern is important.
     """
 
-    def __init__(self, prefix: str):
+    def __init__(self, prefix: str, fmtr: str):
         self.prefix = prefix
+        self.fmtr = fmtr
 
-    def next(self, curr_items: int, curr_deletes: int, *args) -> str:
-        key = np.random.random_integers(low=1 + curr_deletes, high=curr_items)
-        key = '%012d' % key
-        return self.add_prefix(key)
+    def next(self, curr_items: int, curr_deletes: int, *args) -> Key:
+        number = np.random.random_integers(low=curr_deletes,
+                                           high=curr_items - 1)
+        return Key(number=number, prefix=self.prefix, fmtr=self.fmtr)
 
 
-class WorkingSetKey(Generator):
+class WorkingSetKey:
 
     """Extend UniformKey by sampling keys from the fixed working set.
 
@@ -123,48 +127,50 @@ class WorkingSetKey(Generator):
         curr_deletes                                              curr_items
     """
 
-    def __init__(self, working_set: int, working_set_access: int, prefix: str):
+    def __init__(self, working_set: int, working_set_access: int, prefix: str,
+                 fmtr: str):
         self.working_set = working_set
         self.working_set_access = working_set_access
         self.prefix = prefix
+        self.fmtr = fmtr
 
-    def next(self, curr_items: int, curr_deletes: int, curr_offset: int,
-             *args) -> str:
+    def next(self, curr_items: int, curr_deletes: int, curr_offset: int) -> Key:
         num_existing_items = curr_items - curr_deletes
         num_hot_items = int(num_existing_items * self.working_set / 100)
         num_cold_items = num_existing_items - num_hot_items
 
         left_boundary = curr_deletes
         if random.randint(0, 100) <= self.working_set_access:  # cache hit
+            hit = True
             left_boundary += num_cold_items
             right_boundary = curr_items
         else:  # cache miss
+            hit = False
             right_boundary = left_boundary + num_cold_items
 
-        key = np.random.random_integers(low=left_boundary,
-                                        high=right_boundary - 1)
-        key += curr_offset
-        key = 1 + (key * PRIME) % num_existing_items
-        key = '%012d' % key
-        return self.add_prefix(key)
+        number = np.random.random_integers(low=left_boundary,
+                                           high=right_boundary - 1)
+        number += curr_offset
+        number = (number * PRIME) % num_existing_items
+        return Key(number=number, prefix=self.prefix, fmtr=self.fmtr, hit=hit)
 
 
-class ZipfKey(Generator):
+class ZipfKey:
 
     ALPHA = 1.9
 
-    def __init__(self, prefix: str):
+    def __init__(self, prefix: str, fmtr: str):
         self.prefix = prefix
+        self.fmtr = fmtr
 
-    def next(self, curr_items: int, curr_deletes: int, *args) -> str:
-        key = curr_items - np.random.zipf(a=self.ALPHA)
-        if key <= curr_deletes:
-            key = curr_items
-        key = '%012d' % key
-        return self.add_prefix(key)
+    def next(self, curr_items: int, curr_deletes: int, *args) -> Key:
+        number = curr_items - np.random.zipf(a=self.ALPHA)
+        if number <= curr_deletes:
+            number = curr_items - 1
+        return Key(number=number, prefix=self.prefix, fmtr=self.fmtr)
 
 
-class SequentialKey(Generator):
+class SequentialKey:
 
     """Sequentially generate new keys equally divided the workers.
 
@@ -175,19 +181,17 @@ class SequentialKey(Generator):
     This generator is used for loading data.
     """
 
-    def __init__(self, sid: int, ws, prefix: str):
+    def __init__(self, sid: int, ws: WorkloadSettings, prefix: str):
         self.sid = sid
         self.ws = ws
         self.prefix = prefix
 
-    def __iter__(self):
-        for seq_id in range(1 + self.sid, 1 + self.ws.items, self.ws.workers):
-            key = '%012d' % seq_id
-            key = self.add_prefix(key)
-            yield key
+    def __iter__(self) -> Iterator[Key]:
+        for seq_id in range(self.sid, self.ws.items, self.ws.workers):
+            yield Key(number=seq_id, prefix=self.prefix, fmtr=self.ws.key_fmtr)
 
 
-class HotKey(Generator):
+class HotKey:
 
     """Generate the existing keys equally divided between the workers.
 
@@ -197,68 +201,65 @@ class HotKey(Generator):
     This generator is used for warming up the working set.
     """
 
-    def __init__(self, sid: int, ws, prefix: str):
+    def __init__(self, sid: int, ws: WorkloadSettings, prefix: str):
         self.sid = sid
         self.ws = ws
         self.prefix = prefix
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Key]:
         num_hot_keys = int(self.ws.items * self.ws.working_set / 100)
         num_cold_items = self.ws.items - num_hot_keys
 
         for seq_id in range(num_cold_items + self.sid,
                             self.ws.items,
                             self.ws.workers):
-            seq_id = 1 + (seq_id * PRIME) % self.ws.items
-            key = '%012d' % seq_id
-            key = self.add_prefix(key)
-            yield key
+            seq_id = (seq_id * PRIME) % self.ws.items
+            yield Key(number=seq_id, prefix=self.prefix, fmtr=self.ws.key_fmtr)
 
 
-class UnorderedKey(Generator):
+class UnorderedKey:
 
     """Improve SequentialKey by randomizing the order of insertions.
 
     The key space is still the same.
     """
 
-    def __init__(self, sid, ws, prefix):
+    def __init__(self, sid, ws: WorkloadSettings, prefix):
         self.sid = sid
         self.ws = ws
         self.prefix = prefix
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Key]:
         keys_per_workers = self.ws.items // self.ws.workers
 
-        key_id = 0
+        number = 0
         for _ in range(keys_per_workers):
-            key_id = (key_id + PRIME) % keys_per_workers
-            key = '%012d' % (key_id + 1 + self.sid * keys_per_workers)
-            key = self.add_prefix(key)
-            yield key
+            number = (number + PRIME) % keys_per_workers
+            number = number + self.sid * keys_per_workers
+            yield Key(number=number, prefix=self.prefix, fmtr=self.ws.key_fmtr)
 
 
-class KeyForCASUpdate(Generator):
+class KeyForCASUpdate:
 
-    def __init__(self, total_workers: int, prefix: str):
+    def __init__(self, total_workers: int, prefix: str, fmtr: str):
         self.n1ql_workers = total_workers
         self.prefix = prefix
+        self.fmtr = fmtr
 
-    def next(self, sid: int, curr_items: int) -> str:
+    def next(self, sid: int, curr_items: int) -> Key:
         per_worker_items = curr_items // self.n1ql_workers
 
-        left_boundary = 1 + sid * per_worker_items
+        left_boundary = sid * per_worker_items
         right_boundary = left_boundary + per_worker_items
 
-        key = np.random.random_integers(low=left_boundary,
-                                        high=right_boundary)
-        key = '%012d' % key
-        return self.add_prefix(key)
+        number = np.random.random_integers(low=left_boundary,
+                                           high=right_boundary - 1)
+        return Key(number=number, prefix=self.prefix, fmtr=self.fmtr)
 
 
-class FTSKey(Generator):
+class FTSKey:
 
-    def __init__(self, ws):
+    def __init__(self, ws: WorkloadSettings):
         self.mutate_items = 0
         if ws.fts_config:
             self.mutate_items = ws.fts_config.mutate_items
@@ -267,23 +268,7 @@ class FTSKey(Generator):
         return hex(random.randint(0, self.mutate_items))[2:]
 
 
-class HashKeys:
-
-    def __init__(self, workload_settings):
-        self.ws = workload_settings
-
-    def hash_it(self, key: str) -> str:
-        if self.ws.hash_keys:
-            key = key.encode('utf-8')
-            if self.ws.key_length:
-                num_slices = int(math.ceil(self.ws.key_length / 32))
-                doc_key = num_slices * md5(key).hexdigest()
-                return doc_key[:self.ws.key_length]
-            return md5(key).hexdigest()
-        return key
-
-
-class String(Generator):
+class String:
 
     def __init__(self, avg_size: int):
         self.avg_size = avg_size
@@ -300,8 +285,8 @@ class String(Generator):
         body = num_slices * alphabet
         return body[:length_int]
 
-    def next(self, key) -> str:
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> str:
+        alphabet = self._build_alphabet(key.string)
 
         return self._build_string(alphabet, self.avg_size)
 
@@ -310,7 +295,7 @@ class Document(String):
 
     SIZE_VARIATION = 0.25  # 25%
 
-    OVERHEAD = 225  # Minimum size due to static fields, body size is variable
+    OVERHEAD = 205  # Minimum size due to static fields, body size is variable
 
     @classmethod
     def _get_variation_coeff(cls) -> float:
@@ -386,8 +371,8 @@ class Document(String):
             return 0
         return self._get_variation_coeff() * (self.avg_size - self.OVERHEAD)
 
-    def next(self, key) -> dict:
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
 
         return {
@@ -420,8 +405,8 @@ class NestedDocument(Document):
         else:  # Outliers - beta distribution, 2KB-2MB range
             return 2048 / np.random.beta(a=2.2, b=1.0)
 
-    def next(self, key: str):
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key):
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
 
         return {
@@ -446,8 +431,8 @@ class NestedDocument(Document):
 
 class LargeDocument(NestedDocument):
 
-    def next(self, key: str) -> dict:
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         return {
             'nest1': super().next(key),
             'nest2': super(NestedDocument, self).next(key),
@@ -491,10 +476,9 @@ class ReverseLookupDocument(NestedDocument):
     def _build_topics(self, seq_id: int) -> List[str]:
         return []
 
-    def next(self, key: str) -> dict:
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
-        seq_id = int(key[-12:]) + 1
 
         return {
             'name': self._build_name(alphabet),
@@ -513,8 +497,8 @@ class ReverseLookupDocument(NestedDocument):
             'gmtime': self._build_gmtime(alphabet),
             'year': self._build_year(alphabet),
             'body': self._build_string(alphabet, size),
-            'capped_small': self._build_capped(alphabet, seq_id, 100),
-            'topics': self._build_topics(seq_id),
+            'capped_small': self._build_capped(alphabet, key.number, 100),
+            'topics': self._build_topics(key.number),
         }
 
 
@@ -538,10 +522,9 @@ class ReverseRangeLookupDocument(ReverseLookupDocument):
         index = seq_id // num_unique
         return '%s_%s_%12s' % (self.prefix, num_unique, index)
 
-    def next(self, key: str) -> dict:
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
-        seq_id = int(key[-12:]) + 1
 
         return {
             'name': self._build_name(alphabet),
@@ -560,9 +543,11 @@ class ReverseRangeLookupDocument(ReverseLookupDocument):
             'gmtime': self._build_gmtime(alphabet),
             'year': self._build_year(alphabet),
             'body': self._build_string(alphabet, size),
-            'capped_small': self._build_capped(alphabet, seq_id, 100),
-            'capped_small_range': self._build_capped(alphabet, seq_id + (self.distance * 100), 100),
-            'topics': self._build_topics(seq_id),
+            'capped_small': self._build_capped(alphabet, key.number, 100),
+            'capped_small_range': self._build_capped(alphabet,
+                                                     key.number + (self.distance * 100),
+                                                     100),
+            'topics': self._build_topics(key.number),
         }
 
 
@@ -577,10 +562,10 @@ class ExtReverseLookupDocument(ReverseLookupDocument):
     def _build_topics(self, seq_id: int) -> List[str]:
         """1:4 reference to JoinedDocument keys."""
         return [
-            self.add_prefix('%012d' % ((seq_id + 11) % self.num_docs)),
-            self.add_prefix('%012d' % ((seq_id + 19) % self.num_docs)),
-            self.add_prefix('%012d' % ((seq_id + 23) % self.num_docs)),
-            self.add_prefix('%012d' % ((seq_id + 29) % self.num_docs)),
+            decimal_fmtr((seq_id + 11) % self.num_docs, self.prefix),
+            decimal_fmtr((seq_id + 19) % self.num_docs, self.prefix),
+            decimal_fmtr((seq_id + 23) % self.num_docs, self.prefix),
+            decimal_fmtr((seq_id + 29) % self.num_docs, self.prefix),
         ]
 
 
@@ -596,7 +581,7 @@ class JoinedDocument(ReverseLookupDocument):
     def _build_owner(self, seq_id: int) -> str:
         """4:1 reference to ReverseLookupDocument keys."""
         ref_id = seq_id % (self.num_docs // 4)
-        return self.add_prefix('%012d' % ref_id)
+        return decimal_fmtr(ref_id, self.prefix)
 
     def _build_title(self, alphabet: str) -> str:
         return alphabet[:32]
@@ -604,14 +589,14 @@ class JoinedDocument(ReverseLookupDocument):
     def _build_categories(self, seq_id: int) -> List[str]:
         """1:4 reference to RefDocument keys."""
         return [
-            self.add_prefix('%012d' % ((seq_id + 11) % self.num_categories)),
-            self.add_prefix('%012d' % ((seq_id + 19) % self.num_categories)),
-            self.add_prefix('%012d' % ((seq_id + 23) % self.num_categories)),
-            self.add_prefix('%012d' % ((seq_id + 29) % self.num_categories)),
+            decimal_fmtr((seq_id + 11) % self.num_categories, self.prefix),
+            decimal_fmtr((seq_id + 19) % self.num_categories, self.prefix),
+            decimal_fmtr((seq_id + 23) % self.num_categories, self.prefix),
+            decimal_fmtr((seq_id + 29) % self.num_categories, self.prefix),
         ]
 
     def _build_user(self, seq_id: int, idx: int) -> str:
-        return self.add_prefix('%012d' % ((seq_id + idx + 537) % self.num_docs))
+        return decimal_fmtr((seq_id + idx + 537) % self.num_docs, self.prefix)
 
     def _build_replies(self, seq_id: int) -> List[dict]:
         """1:N references to ReverseLookupDocument keys."""
@@ -620,29 +605,26 @@ class JoinedDocument(ReverseLookupDocument):
             for idx in range(self.num_replies)
         ]
 
-    def next(self, key: str) -> dict:
-        alphabet = self._build_alphabet(key)
-        seq_id = int(key[-12:])
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
 
         return {
-            'owner': self._build_owner(seq_id),
+            'owner': self._build_owner(key.number),
             'title': self._build_title(alphabet),
-            'capped': self._build_capped(alphabet, seq_id, 100),
-            'categories': self._build_categories(seq_id),
-            'replies': self._build_replies(seq_id),
+            'capped': self._build_capped(alphabet, key.number, 100),
+            'categories': self._build_categories(key.number),
+            'replies': self._build_replies(key.number),
         }
 
 
 class RefDocument(ReverseLookupDocument):
 
     def _build_ref_name(self, seq_id: int) -> str:
-        return self.add_prefix('%012d' % seq_id)
+        return decimal_fmtr(seq_id, self.prefix)
 
-    def next(self, key: str) -> dict:
-        seq_id = int(key[-12:])
-
+    def next(self, key: Key) -> dict:
         return {
-            'name': self._build_ref_name(seq_id),
+            'name': self._build_ref_name(key.number),
         }
 
 
@@ -722,10 +704,9 @@ class ArrayIndexingDocument(ReverseLookupDocument):
 
         return [offset + i for i in range(self.ARRAY_SIZE)]
 
-    def next(self, key: str) -> dict:
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
-        seq_id = int(key[-12:]) + 1
 
         return {
             'name': self._build_name(alphabet),
@@ -740,13 +721,13 @@ class ArrayIndexingDocument(ReverseLookupDocument):
             'realm': self._build_realm(alphabet),
             'coins': self._build_coins(alphabet),
             'category': self._build_category(alphabet),
-            'achievements1': self._build_achievements1(seq_id),
-            'achievements2': self._build_achievements2(seq_id),
+            'achievements1': self._build_achievements1(key.number + 1),
+            'achievements2': self._build_achievements2(key.number + 1),
             'gmtime': self._build_gmtime(alphabet),
             'year': self._build_year(alphabet),
             'body': self._build_string(alphabet, size),
-            'capped_small': self._build_capped(alphabet, seq_id, 100),
-            'topics': self._build_topics(seq_id),
+            'capped_small': self._build_capped(alphabet, key.number, 100),
+            'topics': self._build_topics(key.number),
         }
 
 
@@ -777,14 +758,13 @@ class ProfileDocument(ReverseLookupDocument):
 
         return '%d %s %s %s' % (num, capped_small, capped_large, suffix)
 
-    def next(self, key: str) -> dict:
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
-        seq_id = int(key[-12:]) + 1
 
         category = self._build_category(alphabet) + 1
-        capped_large = self._build_capped(alphabet, seq_id, 1000 * category)
-        capped_small = self._build_capped(alphabet, seq_id, 10)
+        capped_large = self._build_capped(alphabet, key.number, 1000 * category)
+        capped_small = self._build_capped(alphabet, key.number, 10)
 
         return {
             'first_name': self._build_name(alphabet),
@@ -798,13 +778,13 @@ class ProfileDocument(ReverseLookupDocument):
             'capped_large': capped_large,
             'address': {
                 'street': self._build_long_street(alphabet,
-                                                  seq_id,
+                                                  key.number,
                                                   capped_small,
                                                   capped_large),
                 'city': self._build_city(alphabet),
                 'county': self._build_county(alphabet),
                 'state': self._build_state(alphabet),
-                'zip': self._build_zip(seq_id),
+                'zip': self._build_zip(key.number),
                 'realm': self._build_realm(alphabet),
             },
             'body': self._build_string(alphabet, size),
@@ -817,9 +797,8 @@ class ImportExportDocument(ReverseLookupDocument):
 
     OVERHEAD = 1022
 
-    def next(self, key: str) -> dict:
-        seq_id = int(key[-12:]) + 1
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
         return {
             'name': self._build_name(alphabet) * random.randint(0, 5),
@@ -859,9 +838,9 @@ class ImportExportDocument(ReverseLookupDocument):
             'year': self._build_year(alphabet) * random.randint(0, 5),
             'body': self._build_string(alphabet, size),
             'capped_small': self._build_capped(
-                alphabet, seq_id, 100) * random.randint(0, 5),
+                alphabet, key.number, 100) * random.randint(0, 5),
             'alt_capped_small': self._build_capped(
-                alphabet, seq_id, 100) * random.randint(0, 5),
+                alphabet, key.number, 100) * random.randint(0, 5),
         }
 
 
@@ -884,9 +863,8 @@ class ImportExportDocumentArray(ImportExportDocument):
         result = [value[0 if i == 0 else scope[i - 1]:i + scope[i]] for i in range(num)]
         return result
 
-    def next(self, key: str) -> dict:
-        seq_id = int(key[-12:]) + 1
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
 
         # 25 Fields of random size. Have an array with at least 10 items in five fields.
@@ -933,9 +911,9 @@ class ImportExportDocumentArray(ImportExportDocument):
             'year': self._build_year(alphabet) * random.randint(0, 5),
             'body': self._random_array(self._build_string(alphabet, size), 7),
             'capped_small': self._build_capped(
-                alphabet, seq_id, 100) * random.randint(0, 5),
+                alphabet, key.number, 100) * random.randint(0, 5),
             'alt_capped_small': self._build_capped(
-                alphabet, seq_id, 100) * random.randint(0, 5),
+                alphabet, key.number, 100) * random.randint(0, 5),
         }
 
 
@@ -946,9 +924,8 @@ class ImportExportDocumentNested(ImportExportDocument):
     The documents contain 25 top-level fields (5 nested sub-documents).
     """
 
-    def next(self, key: str) -> dict:
-        seq_id = int(key[-12:]) + 1
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
 
         return {
@@ -995,16 +972,16 @@ class ImportExportDocumentNested(ImportExportDocument):
             'year': self._build_year(alphabet) * random.randint(0, 2),
             'body': self._build_string(alphabet, size),
             'capped_small': self._build_capped(
-                alphabet, seq_id, 10) * random.randint(0, 2),
+                alphabet, key.number, 10) * random.randint(0, 2),
             'alt_capped_small': self._build_capped(
-                alphabet, seq_id, 10) * random.randint(0, 2),
+                alphabet, key.number, 10) * random.randint(0, 2),
         }
 
 
 class GSIMultiIndexDocument(Document):
 
-    def next(self, key: str) -> dict:
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
 
         return {
@@ -1035,8 +1012,8 @@ class PlasmaDocument(Document):
 
 class SmallPlasmaDocument(PlasmaDocument):
 
-    def next(self, key: str) -> dict:
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
 
         return {
             'alt_email': self._build_alt_email(alphabet)
@@ -1045,9 +1022,9 @@ class SmallPlasmaDocument(PlasmaDocument):
 
 class SequentialPlasmaDocument(PlasmaDocument):
 
-    def next(self, key: str) -> dict:
-        alphabet = self._build_alphabet(key)
-        number = key[-12:]
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
+        number = key[-12:]  # FIXME
 
         return {
             'city': self.build_item(alphabet=alphabet, size=17, prefix=number)
@@ -1060,8 +1037,8 @@ class LargeItemPlasmaDocument(PlasmaDocument):
         super().__init__(avg_size)
         self.item_size = item_size
 
-    def next(self, key: str) -> dict:
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
 
         return {
@@ -1085,8 +1062,8 @@ class VaryingItemSizePlasmaDocument(PlasmaDocument):
         self.size_variation_min = size_variation_min
         self.size_variation_max = size_variation_max
 
-    def next(self, key: str) -> dict:
-        alphabet = self._build_alphabet(key)
+    def next(self, key: Key) -> dict:
+        alphabet = self._build_alphabet(key.string)
         size = self._size()
         length = random.randint(self.size_variation_min, self.size_variation_max)
 

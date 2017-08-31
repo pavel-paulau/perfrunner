@@ -13,6 +13,7 @@ from perfrunner.helpers.local import (
 )
 from perfrunner.tests import PerfTest, TargetIterator
 from perfrunner.tests.rebalance import RebalanceTest
+from spring.docgen import format_key
 
 
 class SecondaryIndexTest(PerfTest):
@@ -149,8 +150,8 @@ class SecondaryIndexTest(PerfTest):
                 (self.test_config.access_settings.items - num_hot_items)
         end = start + num_hot_items
 
-        data["ScanSpecs"][0]["Low"][0] = '%012d' % start
-        data["ScanSpecs"][0]["High"][0] = '%012d' % end
+        data["ScanSpecs"][0]["Low"][0] = format_key(start)
+        data["ScanSpecs"][0]["High"][0] = format_key(end)
 
         with open(self.configfile, "w") as jsonFile:
             jsonFile.write(json.dumps(data))

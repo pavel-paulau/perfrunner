@@ -17,7 +17,6 @@ class WorkloadSettings:
         self.doc_gen = options.generator
         self.size = options.size
         self.items = options.items
-        self.expiration = options.expiration
         self.working_set = options.working_set
         self.working_set_access = options.working_set_access
 
@@ -41,7 +40,7 @@ class WorkloadSettings:
 
         self.seq_updates = False
         self.working_set_move_time = 0
-        self.hash_keys = False
+        self.key_fmtr = 'decimal'
 
 
 class TargetSettings:

@@ -308,13 +308,13 @@ class PhaseSettings:
     ITERATIONS = 1
 
     ASYNC = False
-    HASH_KEYS = 0
+
+    KEY_FMTR = 'decimal'
     KEY_LENGTH = 0  # max can be 32
 
     ITEMS = 0
     EXISTING_ITEMS = 0
     SIZE = 2048
-    EXPIRATION = 0
 
     WORKING_SET = 100
     WORKING_SET_ACCESS = 100
@@ -370,7 +370,6 @@ class PhaseSettings:
         self.ops = float(options.get('ops', self.OPS))
         self.throughput = float(options.get('throughput', self.THROUGHPUT))
 
-        self.expiration = int(options.get('expiration', self.EXPIRATION))
         self.working_set = float(options.get('working_set', self.WORKING_SET))
         self.working_set_access = int(options.get('working_set_access',
                                                   self.WORKING_SET_ACCESS))
@@ -380,7 +379,7 @@ class PhaseSettings:
                                                        self.WORKING_SET_DRIFT_ITEMS))
         self.workers = int(options.get('workers', self.WORKERS))
         self.async = bool(int(options.get('async', self.ASYNC)))
-        self.hash_keys = int(options.get('hash_keys', self.HASH_KEYS))
+        self.key_fmtr = options.get('key_fmtr', self.KEY_FMTR)
         self.key_length = int(options.get('key_length', self.KEY_LENGTH))
 
         self.hot_reads = self.HOT_READS
@@ -799,7 +798,7 @@ class TestConfig(Config):
         access.num_categories = load_settings.num_categories
         access.num_replies = load_settings.num_replies
         access.size = load_settings.size
-        access.hash_keys = load_settings.hash_keys
+        access.key_fmtr = load_settings.key_fmtr
         access.key_length = load_settings.key_length
 
         return access

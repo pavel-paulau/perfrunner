@@ -251,4 +251,6 @@ class N1QLQueryGen:
         n1ql_query.adhoc = bool(ad_hoc)
         n1ql_query.consistency = scan_consistency or 'not_bounded'
 
+        n1ql_query.set_option('encoded', False)
+
         return n1ql_query

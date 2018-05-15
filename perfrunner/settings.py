@@ -11,7 +11,7 @@ from perfrunner.helpers.misc import maybe_atoi, target_hash
 
 CBMONITOR_HOST = 'cbmonitor.sc.couchbase.com'
 SHOWFAST_HOST = 'showfast.sc.couchbase.com'
-REPO = 'https://github.com/couchbase/perfrunner'
+REPO = 'https://github.com/pavel-paulau/perfrunner'
 
 
 @decorator
